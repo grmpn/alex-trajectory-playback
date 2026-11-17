@@ -1,0 +1,3 @@
+[submodule "purdue-alex-assets"]
+	path = purdue-alex-assets
+	url = https://github.com/PatrizioAcquadro/purdue-alex-assets.git
