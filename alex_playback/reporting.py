@@ -13,7 +13,9 @@ def write_json(path: Path, value):
     path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n")
 
 
-def confusion(observed, expected):
+def confusion(observed, expected, known=True):
+    if not known:
+        return None
     observed, expected = np.asarray(observed, dtype=bool), np.asarray(expected, dtype=bool)
     return {
         "frames": len(expected),
@@ -42,24 +44,49 @@ def audit_episode(dataset, model, episode, destination):
         [model.action_configuration(dataset.action_names, a) for a in episode.action]
     )
     poses = np.array([model.tcp(q) for q in configurations])
+    if episode.ee is None:
+        episode.ee = np.concatenate((poses, episode.action[:, -2:, None]), axis=-1)
     position_error, angle_error = pose_error(poses, episode.ee[:, :, :7])
-    if position_error.max() > 2e-6 or angle_error.max() > 2e-5:
+    if (
+        episode.has_joint_actions
+        and dataset.enforce_fk_contract
+        and (position_error.max() > 2e-6 or angle_error.max() > 2e-5)
+    ):
         raise ValueError("URDF FK disagrees with the dataset TCP contract")
-    pairs = [model.collisions(q) for q in configurations]
+    pairs = (
+        [model.collisions(q) for q in configurations]
+        if episode.has_joint_actions
+        else [[] for _ in episode.frame]
+    )
     collision = np.array([bool(p) for p in pairs])
     all_invalid = ~episode.valid.any(axis=1)
     summary = {
         "episode": episode.index,
         "frames": len(episode),
-        "nominal_mesh_vs_dataset": confusion(collision, episode.collision),
+        "has_joint_reference": episode.has_joint_actions,
+        "has_collision_labels": episode.has_collision_labels,
+        "has_valid_mask": episode.has_valid_mask,
+        "nominal_mesh_vs_dataset": confusion(
+            collision, episode.collision, episode.has_collision_labels and episode.has_joint_actions
+        ),
         "collision_source_frame_ranges_inclusive": ranges(episode.source_frame[collision]),
         "collision_episode_frame_ranges_inclusive": ranges(episode.frame[collision]),
-        "mismatch_source_frames": episode.source_frame[collision != episode.collision].tolist(),
-        "all_actions_invalid": int(all_invalid.sum()),
-        "collisions_not_fully_masked": int(np.sum(collision & ~all_invalid)),
-        "fully_masked_without_collision": int(np.sum(all_invalid & ~collision)),
-        "max_fk_position_error_m": float(position_error.max()),
-        "max_fk_orientation_error_rad": float(angle_error.max()),
+        "mismatch_source_frames": episode.source_frame[collision != episode.collision].tolist()
+        if episode.has_collision_labels and episode.has_joint_actions
+        else None,
+        "all_actions_invalid": int(all_invalid.sum()) if episode.has_valid_mask else None,
+        "collisions_not_fully_masked": int(np.sum(collision & ~all_invalid))
+        if episode.has_valid_mask and episode.has_joint_actions
+        else None,
+        "fully_masked_without_collision": int(np.sum(all_invalid & ~collision))
+        if episode.has_valid_mask and episode.has_joint_actions
+        else None,
+        "max_fk_position_error_m": float(position_error.max())
+        if episode.has_joint_actions
+        else None,
+        "max_fk_orientation_error_rad": float(angle_error.max())
+        if episode.has_joint_actions
+        else None,
         "method": "Pinocchio / Coal, discrete URDF collision meshes; rigid, adjacent, and upstream exclusions",
     }
     write_json(destination / "summary.json", summary)
@@ -83,6 +110,9 @@ def audit_episode(dataset, model, episode, destination):
         dataset_collision=episode.collision,
         nominal_collision=collision,
         action_valid=episode.valid,
+        has_joint_reference=episode.has_joint_actions,
+        has_collision_labels=episode.has_collision_labels,
+        has_valid_mask=episode.has_valid_mask,
         joint_names=np.array(model.names),
         joint_position=np.array([model.ordered(q, model.names) for q in configurations]),
         tcp_pose_base=poses,
@@ -112,6 +142,7 @@ class Recorder:
         actual_tcp,
         contact=False,
         penetration=False,
+        reference_q=None,
     ):
         self.steps.append(
             {
@@ -120,6 +151,9 @@ class Recorder:
                 "simulation_time_s": simulation_time,
                 "desired_joint_position": np.asarray(desired_q).copy(),
                 "actual_joint_position": np.asarray(actual_q).copy(),
+                "reference_joint_position": np.asarray(
+                    desired_q if reference_q is None else reference_q
+                ).copy(),
                 "desired_tcp_pose_base": np.asarray(desired_tcp).copy(),
                 "actual_tcp_pose_base": np.asarray(actual_tcp).copy(),
                 "physx_contact": contact,
@@ -172,7 +206,12 @@ class Recorder:
         step_arrays = {k: np.asarray([row[k] for row in self.steps]) for k in self.steps[0]}
         for name, arrays in (("frames", frame_arrays), ("steps", step_arrays)):
             np.savez_compressed(
-                self.destination / f"{name}.npz", joint_names=np.array(self.joint_names), **arrays
+                self.destination / f"{name}.npz",
+                joint_names=np.array(self.joint_names),
+                has_joint_reference=self.episode.has_joint_actions,
+                has_collision_labels=self.episode.has_collision_labels,
+                has_valid_mask=self.episode.has_valid_mask,
+                **arrays,
             )
         write_json(self.destination / "collision_pairs.json", self.pairs)
         position_error, angle_error = pose_error(
@@ -201,7 +240,12 @@ class Recorder:
             "physx_penetration",
         ):
             flags = frame_arrays[kind]
-            summary[f"{kind}_vs_dataset"] = confusion(flags, frame_arrays["dataset_collision"])
+            known = self.episode.has_collision_labels and (
+                kind != "nominal_mesh_collision" or self.episode.has_joint_actions
+            )
+            summary[f"{kind}_vs_dataset"] = confusion(
+                flags, frame_arrays["dataset_collision"], known
+            )
             summary[f"{kind}_source_frame_ranges_inclusive"] = ranges(
                 frame_arrays["source_frame_index"][flags]
             )
@@ -227,7 +271,15 @@ class Recorder:
                 writer.writerow(
                     {
                         **{key: row[key] for key in keys},
-                        "all_actions_invalid": not row["action_valid"].any(),
+                        "dataset_collision": row["dataset_collision"]
+                        if self.episode.has_collision_labels
+                        else "",
+                        "nominal_mesh_collision": row["nominal_mesh_collision"]
+                        if self.episode.has_joint_actions
+                        else "",
+                        "all_actions_invalid": not row["action_valid"].any()
+                        if self.episode.has_valid_mask
+                        else "",
                         "left_tcp_error_m": position_error[i, 0],
                         "right_tcp_error_m": position_error[i, 1],
                     }

@@ -1,6 +1,6 @@
 # Alex trajectory playback
 
-Playback of the three retargeted iPhone trajectories on fixed-base Purdue Alex
+Playback of LeRobot v3 trajectories on fixed-base Purdue Alex
 with dual SAKE EZGrippers, using Isaac Lab 3.0.0 and Isaac Sim 6.2.0.
 The Lab checkout is release `v3.0.0`; its core Python distribution identifies
 itself as `28.0.0`, which is the value recorded in `run.json`.
@@ -15,11 +15,21 @@ git submodule update --init --recursive
 uv pip install --python "$VIRTUAL_ENV/bin/python" -r requirements.txt
 export OMNI_KIT_ACCEPT_EULA=YES
 
-# Joint trajectory playback, all three episodes, GUI at half speed.
+# All three included joint trajectories, one GUI.
+./scripts/play_dataset.sh
+
+# Also include all three EE trajectories when wanted.
+./scripts/play_dataset.sh --mode both
+
+# Joint trajectory playback, all episodes, GUI at half speed.
 python playback.py --mode joint --speed 0.5
 
 # Closed-loop DifferentialIKController playback of action.ee.
-python playback.py --mode ik --speed 0.5
+python playback.py --mode ee --speed 0.5
+
+# Any Alex LeRobot v3 episode, with an optional frame interval.
+python playback.py --dataset /path/to/lerobot-v3 --episodes 7 \
+  --mode ee --start-frame 120 --end-frame 300 --speed 0.5
 
 # Execute both modes and record a full comparison without a GUI.
 python playback.py --mode both --headless --output outputs/comparison
@@ -29,14 +39,35 @@ python analyze.py outputs/comparison
 python playback.py --mode audit
 ```
 
-Use `--headless` on this machine for the verified simulation path. The GUI smoke
-check remained in renderer startup for eight minutes and was stopped; GUI
-rendering has not been validated.
+The launcher uses `~/IsaacLab/.venv/bin/python`; set `ISAACLAB_PYTHON` to use another
+installation. Arguments such as `--dataset`, `--episodes`, `--speed`, `--headless`,
+and `--exit-after` pass through to playback. Joint playback is the default;
+`--mode both` runs joint and EE playback in the same simulation window.
+
+The GUI shows the physical robot driven by the supplied PD actuators and a cyan,
+transparent reference at the dataset's joint actions, including during EE playback.
+The reference has no rigid bodies or collision geometry. Intersecting reference
+links turn orange; simulated links turn red for measured mesh intersections or
+PhysX penetration. The panel shows the episode, original frame/source indices,
+collision pairs, and Pause/Resume. Use normal Isaac Sim viewport camera navigation.
+The visibility checkboxes let you inspect the full desired robot or PD robot alone.
+Every reference mesh and material subset uses the transparent material, including
+the head, torso, and both arms.
+The final pose stays visible until the window closes; `--exit-after` closes
+automatically. `--capture-preview` saves each trajectory's final viewport.
+
+`--ghost-opacity 0.25` controls reference transparency. The default `raytraced`
+renderer avoids the default Isaac Sim path-tracing pipeline; `minimal` and
+`pathtraced` are also available. Initial shader-cache warmup can take several
+minutes; subsequent launches reuse the cache. `--render-fps` controls intermediate
+rendering cadence (default 30); every original trajectory frame is displayed.
 
 The local dataset lives in `datasets/iphone-robot`; its source-frame collision
 diagnostics live in `datasets/iphone-export-report`. These inputs and generated
 outputs are Git-ignored. `--dataset`, `--reports`, and `--assets` override their
 locations. `--episodes 0 2` selects episodes; `--max-frames 10` runs a short check.
+`--start-frame` is inclusive and `--end-frame` is exclusive, in each episode's
+frame-index space. Original timestamps and source indices are preserved in logs.
 Output directories must be new so previous recordings cannot be overwritten.
 
 `--speed` scales dataset time relative to simulated time. It does not skip frames
@@ -45,6 +76,34 @@ original 30 Hz sample while respecting `--physics-dt` (default maximum 1/240 s).
 GUI playback is paced to wall time by default; use `--no-realtime` to run as fast
 as possible. Headless playback runs without wall-time pacing by default. Actual
 wall-time playback can be slower than requested if the machine cannot keep up.
+
+## LeRobot v3 inputs
+
+Playback reads `meta/info.json` and selected episodes from `data/**/*.parquet`;
+video decoding, LeRobot installation, export reports, and a dataset README are
+not required. Nonzero episode IDs and reordered joint columns are supported.
+The episode's `frame_index` must start at zero and be contiguous, with timestamps
+matching the declared FPS. Source-frame indices may contain gaps.
+
+- `--joint-key action`: a vector with `features.<key>.names` listing Alex names.
+  Names are the seven `LEFT_*` and seven `RIGHT_*` arm joints, `NECK_Z`, `NECK_Y`,
+  `left_gripper_opening`, and `right_gripper_opening`; see
+  [embodiment.py](alex_playback/embodiment.py). Any ordering or named subset is
+  accepted. Unspecified joints hold zero and unspecified grippers stay open.
+- `--ee-key action.ee`: shape `(2, 7)` or `(2, 8)` per frame, ordered left/right:
+  `[x, y, z, qx, qy, qz, qw, optional_opening]`. Positions are metres in
+  `PEDESTAL_LINK`, quaternions are unit **xyzw**, and openings range from 0 to 1.
+  For EE poses stored in `action`, use `--mode ee --ee-key action`.
+- With joint actions only, EE targets come from FK. With EE actions only, IK
+  settles from a zero-joint seed; the overlay shows **IK joint targets**, explicitly
+  labeled as such because there is no recorded joint reference.
+- `quality.action_valid` and source-video indices are optional. Collision reports
+  are auto-selected only for the bundled dataset; use `--reports` for compatible
+  exports elsewhere. Missing masks and collision labels are marked unavailable,
+  and comparisons are `null`, rather than interpreted as collision-free frames.
+
+These inputs must describe the Purdue Alex embodiment and absolute TCP poses;
+relative EE deltas or trajectories for another robot require conversion first.
 
 ## Robot and control
 
@@ -87,12 +146,13 @@ per playback mode and episode. Each episode folder contains:
 
 | File | Contents |
 | --- | --- |
-| `steps.npz` | Every physics sample: desired/actual joint positions, desired/actual TCP poses, dataset/simulation times, frame indices, contact flags |
+| `steps.npz` | Every physics sample: reference/desired/actual joint positions, desired/actual TCP poses, dataset/simulation times, frame indices, contact flags |
 | `frames.npz` | The same measurements at original dataset frame boundaries, plus source video indices, action-valid masks, and collision labels |
 | `frames.csv` | Frame/source-frame indices, collision flags, mask status, and TCP position errors |
 | `collision_pairs.json` | Nominal and measured mesh pairs, dataset pairs, and PhysX contacts with minimum separation and accumulated normal impulse |
 | `metadata.json` | Timing, actuator types, asset identity, import repairs, pose conventions, and completion status |
 | `summary.json` | Joint/TCP tracking errors, collision confusion matrices, and inclusive source-frame collision ranges |
+| `preview.png` | Final viewport when GUI playback uses `--capture-preview` |
 
 Arrays `desired_joint_position` and `actual_joint_position` use the explicit
 `joint_names` array, including measured mimic followers. Poses have shape
@@ -100,6 +160,10 @@ Arrays `desired_joint_position` and `actual_joint_position` use the explicit
 configuration. In IK mode they are the interpolated `action.ee` targets.
 Settling is excluded from the recorded trajectory clock; frame zero records its
 final state. The last original dataset timestamp is retained exactly.
+`reference_joint_position` stores the overlay configuration: original joint actions
+when available, otherwise IK targets. `metadata.json` identifies which. NPZ files
+also include `has_joint_reference`, `has_collision_labels`, and `has_valid_mask`;
+read these flags before interpreting optional reference arrays.
 
 ```python
 import numpy as np
@@ -150,6 +214,14 @@ This script is a simulation player, not a hardware execution interface.
 
 ## Validated run
 
+GUI joint playback completed all three episodes in `outputs/gui-validation` with
+joint states identical to the headless recordings. The corrected full-reference
+materials and Pause/Resume were checked on episode 0, frames 50–57, at half speed
+in `outputs/full-reference-check`. Its `reference-only.png`, `pd-only.png`, and
+`preview.png` show the separate robots and combined overlay. The viewer applies
+the reference material directly to every mesh and material subset, including
+deinstancing visual geometry where necessary; collision geometry is unaffected.
+
 The full headless run in `outputs/final-validation` executed all 1,069 frames in
 each mode at `--speed 1`, recording 2,138 frame samples and 17,062 physics samples.
 The saved measured TCP positions agree with independent FK of the measured joints
@@ -181,5 +253,5 @@ python playback.py --mode both --headless --episodes 0 --max-frames 4
 ```
 
 The small regression suite covers speed/frame alignment, quaternion sign changes,
-and the lossless visual-mesh repair. Full-run collision and kinematic checks are
-part of playback itself.
+lossless visual-mesh repair, LeRobot episode/slice selection, named joint ordering,
+and EE-only inputs. Full-run collision and kinematic checks are part of playback.

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Play all three dataset trajectories on the fixed-base Purdue Alex."""
+"""Play selected LeRobot v3 trajectories on the fixed-base Purdue Alex."""
 
 import argparse
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 
@@ -18,18 +18,31 @@ def positive(value):
     return value
 
 
-def main():
+def main(argv=None):
     root = Path(__file__).resolve().parent
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("joint", "ik", "both", "audit"), default="joint")
+    parser.add_argument("--mode", choices=("joint", "ik", "ee", "both", "audit"), default="joint")
     parser.add_argument("--dataset", type=Path, default=root / "datasets/iphone-robot")
-    parser.add_argument("--reports", type=Path, default=root / "datasets/iphone-export-report")
+    parser.add_argument(
+        "--reports",
+        type=Path,
+        help="Optional collision diagnostics; auto-selected for the bundled dataset",
+    )
+    parser.add_argument(
+        "--joint-key", default="action", help="LeRobot feature containing named Alex joint actions"
+    )
+    parser.add_argument(
+        "--ee-key", default="action.ee", help="LeRobot feature containing base-frame TCP poses"
+    )
     parser.add_argument("--assets", type=Path, default=root / "purdue-alex-assets")
     parser.add_argument(
         "--output", type=Path, help="New output directory (existing paths are never overwritten)"
     )
     parser.add_argument(
-        "--episodes", type=int, nargs="+", help="Episode indices; defaults to all three"
+        "--episodes",
+        type=int,
+        nargs="+",
+        help="Episode indices; defaults to all available episodes",
     )
     parser.add_argument(
         "--speed",
@@ -44,6 +57,21 @@ def main():
         "--settle-time", type=float, default=1.0, help="Initial PD settling time before recording"
     )
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument(
+        "--renderer", choices=("minimal", "raytraced", "pathtraced"), default="raytraced"
+    )
+    parser.add_argument("--ghost-opacity", type=float, default=0.25)
+    parser.add_argument("--render-fps", type=positive, default=30.0)
+    parser.add_argument(
+        "--exit-after",
+        action="store_true",
+        help="Close the GUI when the playlist finishes instead of leaving it open",
+    )
+    parser.add_argument(
+        "--capture-preview", action="store_true", help="Save a viewport image after each trajectory"
+    )
+    parser.add_argument("--start-frame", type=int, default=0, help="First episode frame to play")
+    parser.add_argument("--end-frame", type=int, help="Exclusive last episode frame to play")
     parser.add_argument(
         "--realtime",
         action=argparse.BooleanOptionalAction,
@@ -66,7 +94,13 @@ def main():
         type=int,
         help="Limit each episode for a smoke run; outputs are marked as partial episodes",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.mode == "ee":
+        args.mode = "ik"
+    if not 0 < args.ghost_opacity < 1:
+        parser.error("--ghost-opacity must be between 0 and 1")
+    if args.start_frame < 0 or (args.end_frame is not None and args.end_frame <= args.start_frame):
+        parser.error("Frame selection requires 0 <= --start-frame < --end-frame")
     if not 0 <= args.settle_time < float("inf"):
         parser.error("--settle-time must be nonnegative and finite")
     if args.max_frames is not None and args.max_frames < 1:
@@ -74,15 +108,24 @@ def main():
     if args.realtime is None:
         args.realtime = not args.headless
     output = (
-        args.output or root / "outputs" / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+        args.output or root / "outputs" / datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
     ).resolve()
     if output.exists():
         parser.error(f"Output directory already exists: {output}")
-    dataset = Dataset(args.dataset.resolve(), args.reports.resolve(), args.assets.resolve())
+    if (
+        args.reports is None
+        and args.dataset.resolve() == (root / "datasets/iphone-robot").resolve()
+    ):
+        args.reports = root / "datasets/iphone-export-report"
+    dataset = Dataset(
+        args.dataset.resolve(), args.reports, args.assets.resolve(), args.joint_key, args.ee_key
+    )
     ids = args.episodes if args.episodes is not None else dataset.episode_ids
     if len(ids) != len(set(ids)):
         parser.error("Episode indices must be unique")
-    episodes = [dataset.episode(i, args.max_frames) for i in ids]
+    episodes = [dataset.episode(i, args.max_frames, args.start_frame, args.end_frame) for i in ids]
+    if args.mode in ("joint", "both") and not dataset.joint_key:
+        parser.error("This dataset has no joint actions; use --mode ee")
     model = RobotModel(
         dataset.urdf,
         dataset.assets,

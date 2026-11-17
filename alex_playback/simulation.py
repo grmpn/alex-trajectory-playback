@@ -225,6 +225,10 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
     from isaaclab.assets import Articulation
     from isaaclab_physx.physics import PhysxCfg
 
+    from .viewer import Viewer, configure_renderer
+
+    if not args.headless:
+        configure_renderer(args.renderer)
     launcher_parser = argparse.ArgumentParser()
     add_launcher_args(launcher_parser)
     launcher_args = launcher_parser.parse_args(
@@ -232,6 +236,7 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
     )
     sim_cfg = sim_utils.SimulationCfg(
         dt=dt,
+        render_interval=max(1, math.ceil(1 / (args.render_fps * dt))),
         device=args.device,
         gravity=(0, 0, -9.81),
         use_newton_actuators=False,
@@ -259,6 +264,7 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
         fix_world_joint(stage, "/World/Robot", dataset.embodiment["base_frame"])
         author_alex_purdue_frames(stage, "/World/Robot", asset_path=dataset.urdf)
         contacts = Contacts(stage, "/World/Robot", model)
+        viewer = None
         if not args.headless:
             light = sim_utils.DomeLightCfg(intensity=2500)
             light.func("/World/Light", light)
@@ -267,10 +273,15 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.2, 0.2, 0.2)),
             )
             floor.func("/World/Floor", floor, translation=(0, 0, -1.0))
-            simulation.set_camera_view((2, 2, 1.3), (0.2, 0, 0))
+            viewer = Viewer(stage, model, args.ghost_opacity, args.speed, args.renderer)
+            viewer.configure_viewport()
         simulation.reset()
         contacts.initialize()
         controller = Controller(robot, model, dataset, args)
+        if viewer:
+            viewer.configure_viewport()
+            simulation.set_camera_view((1.6, 1.6, 1.0), (0.15, 0, 0.05))
+            viewer.set_base_pose(robot.data.root_link_pose_w.torch[0].cpu().numpy())
         modes = ("joint", "ik") if args.mode == "both" else (args.mode,)
         for mode in modes:
             for episode in episodes:
@@ -291,14 +302,25 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                     "actuators": {name: type(a).__name__ for name, a in robot.actuators.items()},
                     "ik_damping": args.ik_damping,
                     "ik_max_joint_step_rad": args.ik_max_joint_step,
-                    "full_episode": len(episode)
-                    == sum(r["episode_index"] == episode.index for r in dataset.rows),
+                    "full_episode": len(episode) == episode.full_length,
+                    "first_episode_frame": int(episode.frame[0]),
+                    "reference_joint_position_kind": "dataset actions"
+                    if episode.has_joint_actions
+                    else "IK joint targets",
+                    "ee_target_kind": "dataset actions"
+                    if episode.has_ee_actions
+                    else "FK of dataset joints",
+                    "has_collision_labels": episode.has_collision_labels,
+                    "has_valid_mask": episode.has_valid_mask,
+                    "renderer": args.renderer if viewer else None,
                 }
                 recorder = Recorder(
                     output / mode / f"episode-{episode.index}", episode, controller.names, metadata
                 )
                 complete = False
                 try:
+                    if viewer:
+                        viewer.set_episode(mode, episode)
                     initial = controller.tensor(model.ordered(reference_q[0], controller.names))
                     zero_velocity = torch.zeros_like(initial)
                     robot.write_joint_position_to_sim_index(position=initial)
@@ -306,11 +328,22 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                     robot.reset()
                     for ik in controller.ik:
                         ik.reset()
-                    for _ in range(max(1, math.ceil(args.settle_time / dt))):
-                        controller.write(initial, zero_velocity)
-                        simulation.step(render=not args.headless)
+                    target = initial
+                    for settle_step in range(max(1, math.ceil(args.settle_time / dt))):
+                        if not episode.has_joint_actions:
+                            target = controller.target(reference_q[0], episode.ee[0, :, :7], mode)
+                        controller.write(target, zero_velocity)
+                        simulation.step(render=False)
                         robot.update(dt)
                         contacts.update()
+                        if viewer and settle_step % sim_cfg.render_interval == 0:
+                            ghost_q = (
+                                reference_q[0]
+                                if episode.has_joint_actions
+                                else model.configuration(controller.names, target[0].cpu().numpy())
+                            )
+                            viewer.set_reference(ghost_q)
+                            simulation.render()
                     controller.validate_frames()
                     wall_start = time.monotonic()
                     physics_steps = 0
@@ -324,20 +357,24 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                             episode.ee[previous, :, :7], episode.ee[i, :, :7], fractions
                         )
                         if i == 0:
-                            target = initial
                             Contacts.merge(frame_contacts, contacts.current)
                             recorder.step(
-                                0,
-                                0,
+                                int(episode.frame[0]),
+                                float(episode.time[0]),
                                 0,
                                 target[0].cpu().numpy(),
                                 robot.data.joint_pos.torch[0].cpu().numpy(),
-                                episode.ee[0, :, :7],
+                                model.tcp(reference_q[0])
+                                if mode == "joint"
+                                else episode.ee[0, :, :7],
                                 controller.poses()[0].cpu().numpy(),
                                 bool(contacts.current),
                                 any(
                                     v["min_separation_m"] < -1e-6 for v in contacts.current.values()
                                 ),
+                                reference_q=model.ordered(reference_q[0], controller.names)
+                                if episode.has_joint_actions
+                                else target[0].cpu().numpy(),
                             )
                         else:
                             velocity = controller.tensor(
@@ -351,6 +388,10 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                             if mode == "ik":
                                 velocity[:, controller.arm_ids[0] + controller.arm_ids[1]] = 0
                             for substep, alpha in enumerate(fractions):
+                                if viewer:
+                                    wall_start += viewer.wait_if_paused(simulation)
+                                if not simulation.is_running():
+                                    raise KeyboardInterrupt("Simulation window closed")
                                 reference = (1 - alpha) * reference_q[
                                     previous
                                 ] + alpha * reference_q[i]
@@ -361,7 +402,7 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                                 )
                                 target = controller.target(reference, desired_tcp, mode)
                                 controller.write(target, velocity)
-                                simulation.step(render=not args.headless)
+                                simulation.step(render=False)
                                 robot.update(dt)
                                 contacts.update()
                                 physics_steps += 1
@@ -372,8 +413,11 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                                         "Simulation produced a nonfinite joint state"
                                     )
                                 recorder.step(
-                                    i,
-                                    (previous + alpha) / dataset.fps,
+                                    int(episode.frame[i]),
+                                    float(
+                                        (1 - alpha) * episode.time[previous]
+                                        + alpha * episode.time[i]
+                                    ),
                                     physics_steps * dt,
                                     target[0].cpu().numpy(),
                                     actual,
@@ -384,7 +428,24 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                                         v["min_separation_m"] < -1e-6
                                         for v in contacts.current.values()
                                     ),
+                                    reference_q=model.ordered(reference, controller.names)
+                                    if episode.has_joint_actions
+                                    else target[0].cpu().numpy(),
                                 )
+                                if (
+                                    viewer
+                                    and physics_steps % sim_cfg.render_interval == 0
+                                    and substep < steps_per_frame - 1
+                                ):
+                                    ghost_q = (
+                                        reference
+                                        if episode.has_joint_actions
+                                        else model.configuration(
+                                            controller.names, target[0].cpu().numpy()
+                                        )
+                                    )
+                                    viewer.set_reference(ghost_q)
+                                    simulation.render()
                                 if args.realtime:
                                     time.sleep(
                                         max(0, wall_start + physics_steps * dt - time.monotonic())
@@ -392,15 +453,26 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                         q_actual = model.configuration(
                             controller.names, robot.data.joint_pos.torch[0].cpu().numpy()
                         )
-                        recorder.frame(
-                            i, nominal_pairs[i], model.collisions(q_actual), frame_contacts
-                        )
+                        actual_pairs = model.collisions(q_actual)
+                        recorder.frame(i, nominal_pairs[i], actual_pairs, frame_contacts)
+                        if viewer:
+                            ghost_q = (
+                                reference_q[i]
+                                if episode.has_joint_actions
+                                else model.configuration(controller.names, target[0].cpu().numpy())
+                            )
+                            viewer.set_reference(ghost_q)
+                            viewer.highlight(nominal_pairs[i], actual_pairs, frame_contacts)
+                            viewer.set_frame(episode, i)
+                            simulation.render()
                         if i % 100 == 0 or i == len(episode) - 1:
                             print(
                                 f"{mode} episode {episode.index}: {i + 1}/{len(episode)} frames",
                                 flush=True,
                             )
                     complete = True
+                    if viewer and args.capture_preview:
+                        viewer.capture(simulation, recorder.destination / "preview.png")
                 finally:
                     summary = recorder.save(complete)
                     results.append({"mode": mode, **summary})
@@ -414,3 +486,5 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                     flush=True,
                 )
         print(f"Results: {output}", flush=True)
+        if viewer:
+            viewer.finish(simulation, keep_open=not args.exit_after)
