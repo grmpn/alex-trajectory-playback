@@ -1,0 +1,9 @@
+/AGENTS.md
+/datasets/
+/outputs/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.obsidian/

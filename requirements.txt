@@ -1,0 +1,4 @@
+# Install into the existing Isaac Lab 3.0 / Isaac Sim 6.2 environment.
+-e ./purdue-alex-assets
+pyarrow>=18
+# numpy, scipy, PyYAML, pin (Pinocchio/Coal), and torch come with Isaac Lab.
