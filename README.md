@@ -175,6 +175,44 @@ tcp_desired = log["desired_tcp_pose_base"]
 tcp_actual = log["actual_tcp_pose_base"]
 ```
 
+## TCP tracking and fixed-target diagnostics
+
+```bash
+# X/Y/Z desired vs actual, both TCPs, each episode and recorded control mode.
+python analyze.py outputs/final-validation --output outputs/tcp-plots
+
+# Abruptly switch from episode 0 frame 0 to frame 35, then hold for 8 seconds.
+python playback.py --mode joint --headless --episodes 0 --end-frame 36 \
+  --step-target-frame 35 --step-delay 1 --step-hold 8 --settle-time 2 \
+  --output outputs/step-response
+python analyze.py outputs/step-response
+```
+
+Analysis writes a six-panel PNG for each episode/mode, a combined
+`tcp-position-tracking.pdf`, and per-axis RMSE in `tcp-position-summary.json`.
+Plots use every physics sample, simulation seconds, and TCP positions in metres
+in `PEDESTAL_LINK`. Desired TCPs in joint mode come from FK of joint commands;
+actual TCPs come from simulated link poses. Pink shading marks PhysX contact.
+The existing collision and position-error plots are also generated for playback.
+
+The step experiment requires headless joint mode at speed 1. It initializes at
+`--start-frame`, settles under PD control, records a baseline for `--step-delay`,
+then switches all joint targets to `--step-target-frame` without interpolation.
+Joint velocity targets remain zero, and the upstream gains, torque limits,
+gravity compensation, and contacts are unchanged. Durations round up to physics
+steps. The target frame must be within each selected episode/frame interval.
+The defaults are a 1-second baseline and an 8-second hold.
+
+Step recordings use `joint/episode-N/steps.npz` and `metadata.json`, with the
+source frames and synthetic experiment timing recorded explicitly. At time `t`,
+the log pairs the measured state with the command applied over `[t, t+dt)`;
+the command changes at the marked step time, before the robot responds.
+`summary.json` includes final errors averaged over the last 0.5 seconds, contact
+counts, and time after the switch to enter and remain within 2 mm of the target.
+Settling is `null` unless the final in-band interval lasts at least 0.5 seconds.
+Analysis saves `fixed-target-step-response-episode-N.png` and a PDF; original
+episode collision audits are not plotted against this synthetic clock.
+
 ## Collision interpretation
 
 `quality.action_valid` is a composite mask: tracking, observations, IK, joint

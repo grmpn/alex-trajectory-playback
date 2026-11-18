@@ -56,6 +56,15 @@ def main(argv=None):
     parser.add_argument(
         "--settle-time", type=float, default=1.0, help="Initial PD settling time before recording"
     )
+    parser.add_argument(
+        "--step-target-frame",
+        type=int,
+        help="Run a fixed joint-target step from --start-frame to this episode frame (headless joint mode)",
+    )
+    parser.add_argument("--step-delay", type=positive, default=1.0, help="Seconds before the step")
+    parser.add_argument(
+        "--step-hold", type=positive, default=8.0, help="Seconds holding the step target"
+    )
     parser.add_argument("--headless", action="store_true")
     parser.add_argument(
         "--renderer", choices=("minimal", "raytraced", "pathtraced"), default="raytraced"
@@ -105,6 +114,11 @@ def main(argv=None):
         parser.error("--settle-time must be nonnegative and finite")
     if args.max_frames is not None and args.max_frames < 1:
         parser.error("--max-frames must be positive")
+    if args.step_target_frame is not None:
+        if args.mode != "joint" or not args.headless or args.speed != 1:
+            parser.error("Step response requires --mode joint --headless and --speed 1")
+        if args.step_target_frame <= args.start_frame:
+            parser.error("--step-target-frame must follow --start-frame")
     if args.realtime is None:
         args.realtime = not args.headless
     output = (
@@ -124,6 +138,10 @@ def main(argv=None):
     if len(ids) != len(set(ids)):
         parser.error("Episode indices must be unique")
     episodes = [dataset.episode(i, args.max_frames, args.start_frame, args.end_frame) for i in ids]
+    if args.step_target_frame is not None and any(
+        args.step_target_frame not in episode.frame for episode in episodes
+    ):
+        parser.error("--step-target-frame must be inside every selected episode/frame interval")
     if args.mode in ("joint", "both") and not dataset.joint_key:
         parser.error("This dataset has no joint actions; use --mode ee")
     model = RobotModel(

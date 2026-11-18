@@ -282,6 +282,25 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
             viewer.configure_viewport()
             simulation.set_camera_view((1.6, 1.6, 1.0), (0.15, 0, 0.05))
             viewer.set_base_pose(robot.data.root_link_pose_w.torch[0].cpu().numpy())
+        if args.step_target_frame is not None:
+            from .step_response import run_step_response
+
+            for episode in episodes:
+                results.append(
+                    run_step_response(
+                        simulation,
+                        controller,
+                        contacts,
+                        episode,
+                        audits[episode.index][1],
+                        args,
+                        output,
+                        dt,
+                    )
+                )
+                write_json(output / "summary.json", {"step_response": results})
+            print(f"Results: {output}", flush=True)
+            return
         modes = ("joint", "ik") if args.mode == "both" else (args.mode,)
         for mode in modes:
             for episode in episodes:
