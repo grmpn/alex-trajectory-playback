@@ -75,6 +75,8 @@ def run_step_response(simulation, controller, contacts, episode, reference_q, ar
         "hold_time_s": float(time[-1] - step_time),
         "settle_time_s": max(1, math.ceil(args.settle_time / dt)) * dt,
         "gravity_compensation": args.gravity_compensation,
+        "kd_scale": args.kd_scale,
+        "pd_gains_by_joint": controller.gains(),
         "actuators": {name: type(a).__name__ for name, a in robot.actuators.items()},
         "target_velocity": "zero for every joint throughout the experiment",
         "sample_convention": "state and command at interval start; command is applied over [t, t+dt)",

@@ -216,6 +216,19 @@ class Controller:
             )
         self.robot.write_data_to_sim()
 
+    def gains(self):
+        """Resolved gains of active joints; passive mimic followers have no PD actuator."""
+        return {
+            name: {"kp_nm_per_rad": kp, "kd_nm_s_per_rad": kd}
+            for actuator in self.robot.actuators.values()
+            for name, kp, kd in zip(
+                actuator.joint_names,
+                actuator.stiffness[0].cpu().tolist(),
+                actuator.damping[0].cpu().tolist(),
+                strict=True,
+            )
+        }
+
 
 def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
     import isaaclab.sim as sim_utils
@@ -256,6 +269,12 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
         cfg = make_alex_purdue_cfg(asset_path=simulation_urdf, fix_base=True).replace(
             prim_path="/World/Robot"
         )
+        for actuator in cfg.actuators.values():
+            actuator.damping = (
+                {pattern: gain * args.kd_scale for pattern, gain in actuator.damping.items()}
+                if isinstance(actuator.damping, dict)
+                else actuator.damping * args.kd_scale
+            )
         cfg.spawn.usd_dir = str((output / "usd").resolve())
         # Select the backend layer explicitly instead of the neutral default.
         cfg.spawn.variants = {"Physics": "physx"}
@@ -314,6 +333,8 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                     "steps_per_frame": steps_per_frame,
                     "settle_time_s": args.settle_time,
                     "gravity_compensation": args.gravity_compensation,
+                    "kd_scale": args.kd_scale,
+                    "pd_gains_by_joint": controller.gains(),
                     "asset_revision": dataset.embodiment["asset_revision"],
                     "urdf": dataset.embodiment["urdf"],
                     "simulation_urdf": str(simulation_urdf),

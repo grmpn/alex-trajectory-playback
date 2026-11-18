@@ -112,7 +112,7 @@ def plot_tcp_positions(run, output):
                     f"Episode {episode} · {'Joint PD' if mode == 'joint' else 'Differential IK + PD'}\n"
                     f"Desired vs actual TCP position · playback speed {metadata['speed']:g}×"
                 )
-            title += f" · {metadata['pose_frame']}"
+            title += f" · Kd {metadata.get('kd_scale', 1):g}× · {metadata['pose_frame']}"
             if not metadata.get("complete", False):
                 title += " · INCOMPLETE RUN"
             if contact.any():
@@ -135,6 +135,10 @@ def plot_tcp_positions(run, output):
                     "position_rmse_mm": np.sqrt(
                         np.mean(np.sum(error_mm**2, axis=-1), axis=0)
                     ).tolist(),
+                    "position_peak_error_mm": np.linalg.norm(error_mm, axis=-1)
+                    .max(axis=0)
+                    .tolist(),
+                    "axis_peak_absolute_error_mm": np.abs(error_mm).max(axis=0).tolist(),
                 }
             )
     (output / "tcp-position-summary.json").write_text(json.dumps(summaries, indent=2) + "\n")

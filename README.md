@@ -179,7 +179,7 @@ tcp_actual = log["actual_tcp_pose_base"]
 
 ```bash
 # X/Y/Z desired vs actual, both TCPs, each episode and recorded control mode.
-python analyze.py outputs/final-validation --output outputs/tcp-plots
+python analyze.py outputs/archive/2026-11-17/final-validation --output outputs/tcp-plots
 
 # Abruptly switch from episode 0 frame 0 to frame 35, then hold for 8 seconds.
 python playback.py --mode joint --headless --episodes 0 --end-frame 36 \
@@ -189,7 +189,9 @@ python analyze.py outputs/step-response
 ```
 
 Analysis writes a six-panel PNG for each episode/mode, a combined
-`tcp-position-tracking.pdf`, and per-axis RMSE in `tcp-position-summary.json`.
+`tcp-position-tracking.pdf`, and per-axis/3D RMSE and peak errors in
+`tcp-position-summary.json`. RMSE and peaks use every recorded physics sample;
+3D error is the Euclidean distance between actual and desired TCP positions.
 Plots use every physics sample, simulation seconds, and TCP positions in metres
 in `PEDESTAL_LINK`. Desired TCPs in joint mode come from FK of joint commands;
 actual TCPs come from simulated link poses. Pink shading marks PhysX contact.
@@ -212,6 +214,31 @@ counts, and time after the switch to enter and remain within 2 mm of the target.
 Settling is `null` unless the final in-band interval lasts at least 0.5 seconds.
 Analysis saves `fixed-target-step-response-episode-N.png` and a PDF; original
 episode collision audits are not plotted against this synthetic clock.
+
+For damping experiments, `--kd-scale` multiplies the upstream damping gains of
+all 20 actuated arm, neck, and gripper joints. Position gains, armature, limits,
+and the four passive mimic followers are unchanged. The default is `1.0`.
+Resolved gains for each active joint are saved in `metadata.json` as
+`pd_gains_by_joint`, using N m/rad for Kp and N m s/rad for Kd.
+
+```bash
+python playback.py --mode joint --headless --episodes 0 --kd-scale 1.5 \
+  --output outputs/episode-0-kd-1p5
+python analyze.py outputs/episode-0-kd-1p5
+```
+
+Normal playback still supplies the finite-difference desired joint velocities.
+Scaling Kd therefore scales both velocity feedback and desired-velocity
+feedforward in the PD velocity-error term. The fixed-target step experiment
+continues to use zero desired velocity, including with a damping override.
+
+Previous-day output folders are organized under `outputs/archive/YYYY-MM-DD/`.
+The archive contains a move manifest; recorded paths inside older run metadata
+retain their original provenance. The 2026-11-18 damping sweep, joint-window
+plots, plotting script, and CSV/JSON metrics are in
+`outputs/damping-sweep-20261118/`. Its comparison uses all 2,145 physics samples
+of episode 0, with the archived 1× run as the baseline. The joint plots cover
+all 24 recorded joints in episode 1 from 2.5 through 5.0 simulation seconds.
 
 ## Collision interpretation
 
@@ -252,16 +279,18 @@ This script is a simulation player, not a hardware execution interface.
 
 ## Validated run
 
-GUI joint playback completed all three episodes in `outputs/gui-validation` with
-joint states identical to the headless recordings. The corrected full-reference
+GUI joint playback completed all three episodes in
+`outputs/archive/2026-11-17/gui-validation` with joint states identical to the
+headless recordings. The corrected full-reference
 materials and Pause/Resume were checked on episode 0, frames 50–57, at half speed
-in `outputs/full-reference-check`. Its `reference-only.png`, `pd-only.png`, and
-`preview.png` show the separate robots and combined overlay. The viewer applies
+in `outputs/archive/2026-11-17/full-reference-check`. Its `reference-only.png`,
+`pd-only.png`, and `preview.png` show the separate robots and combined overlay. The viewer applies
 the reference material directly to every mesh and material subset, including
 deinstancing visual geometry where necessary; collision geometry is unaffected.
 
-The full headless run in `outputs/final-validation` executed all 1,069 frames in
-each mode at `--speed 1`, recording 2,138 frame samples and 17,062 physics samples.
+The full headless run in `outputs/archive/2026-11-17/final-validation` executed
+all 1,069 frames in each mode at `--speed 1`, recording 2,138 frame samples and
+17,062 physics samples.
 The saved measured TCP positions agree with independent FK of the measured joints
 within 1 micrometre; orientations agree within 2 microradians. The 2× speed check
 also preserved every input frame and the expected simulation timestamps.

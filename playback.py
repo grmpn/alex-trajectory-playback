@@ -91,6 +91,12 @@ def main(argv=None):
     parser.add_argument(
         "--gravity-compensation", action=argparse.BooleanOptionalAction, default=True
     )
+    parser.add_argument(
+        "--kd-scale",
+        type=positive,
+        default=1.0,
+        help="Multiply all upstream PD damping gains; position gains remain unchanged",
+    )
     parser.add_argument("--ik-damping", type=positive, default=0.05)
     parser.add_argument(
         "--ik-max-joint-step",
