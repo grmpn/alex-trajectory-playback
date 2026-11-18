@@ -97,6 +97,11 @@ def main(argv=None):
         default=1.0,
         help="Multiply all upstream PD damping gains; position gains remain unchanged",
     )
+    parser.add_argument(
+        "--record-control",
+        action="store_true",
+        help="Record pre-step joint commands, measured states, and actuator torques during trajectory playback",
+    )
     parser.add_argument("--ik-damping", type=positive, default=0.05)
     parser.add_argument(
         "--ik-max-joint-step",
@@ -120,6 +125,8 @@ def main(argv=None):
         parser.error("--settle-time must be nonnegative and finite")
     if args.max_frames is not None and args.max_frames < 1:
         parser.error("--max-frames must be positive")
+    if args.record_control and (args.mode == "audit" or args.step_target_frame is not None):
+        parser.error("--record-control requires trajectory playback")
     if args.step_target_frame is not None:
         if args.mode != "joint" or not args.headless or args.speed != 1:
             parser.error("Step response requires --mode joint --headless and --speed 1")

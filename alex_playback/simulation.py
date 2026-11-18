@@ -229,6 +229,22 @@ class Controller:
             )
         }
 
+    def control_signals(self):
+        """Snapshot after write_data_to_sim, before stepping: PD inputs and outputs align."""
+        actuators = self.robot.actuators
+        signals = {
+            "desired_joint_position": actuators.target_command.position.torch,
+            "actual_joint_position": self.robot.data.joint_pos.torch,
+            "desired_joint_velocity": actuators.target_command.velocity.torch,
+            "actual_joint_velocity": self.robot.data.joint_vel.torch,
+            "feedforward_effort": actuators.target_command.effort.torch,
+            "computed_effort": actuators.computed_effort.torch,
+            "applied_effort": actuators.applied_effort.torch,
+            "submitted_effort": actuators.output_command.effort.torch,
+        }
+        values = torch.stack([value[0] for value in signals.values()]).cpu().numpy()
+        return dict(zip(signals, values, strict=True))
+
 
 def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
     import isaaclab.sim as sim_utils
@@ -357,6 +373,25 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                 recorder = Recorder(
                     output / mode / f"episode-{episode.index}", episode, controller.names, metadata
                 )
+                if args.record_control:
+                    metadata["control_trace"] = {
+                        "file": "control.npz",
+                        "sample_convention": "after actuator computation, before physics; commands apply over [t, t+dt)",
+                        "time_origin": "trajectory start; negative times are initial settling",
+                        "position_target_timing": "target calculated for trajectory time t+dt; settling holds the initial reference",
+                        "units": "positions rad, velocities rad/s, efforts N m, time s",
+                        "applied_effort_kind": "clipped actuator command, not measured net joint torque",
+                        "active_joint_names": [controller.names[j] for j in controller.controlled],
+                        "effort_limit_nm_by_joint": {
+                            name: limit
+                            for actuator in robot.actuators.values()
+                            for name, limit in zip(
+                                actuator.joint_names,
+                                actuator.actuator_effort_limit[0].cpu().tolist(),
+                                strict=True,
+                            )
+                        },
+                    }
                 complete = False
                 try:
                     if viewer:
@@ -369,10 +404,17 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                     for ik in controller.ik:
                         ik.reset()
                     target = initial
-                    for settle_step in range(max(1, math.ceil(args.settle_time / dt))):
+                    settle_steps = max(1, math.ceil(args.settle_time / dt))
+                    for settle_step in range(settle_steps):
                         if not episode.has_joint_actions:
                             target = controller.target(reference_q[0], episode.ee[0, :, :7], mode)
                         controller.write(target, zero_velocity)
+                        if args.record_control:
+                            recorder.control(
+                                (settle_step - settle_steps) * dt,
+                                "settling",
+                                controller.control_signals(),
+                            )
                         simulation.step(render=False)
                         robot.update(dt)
                         contacts.update()
@@ -442,6 +484,12 @@ def run(dataset, model, episodes, audits, args, output, steps_per_frame, dt):
                                 )
                                 target = controller.target(reference, desired_tcp, mode)
                                 controller.write(target, velocity)
+                                if args.record_control:
+                                    recorder.control(
+                                        physics_steps * dt,
+                                        "trajectory",
+                                        controller.control_signals(),
+                                    )
                                 simulation.step(render=False)
                                 robot.update(dt)
                                 contacts.update()

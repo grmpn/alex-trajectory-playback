@@ -232,6 +232,27 @@ Scaling Kd therefore scales both velocity feedback and desired-velocity
 feedforward in the PD velocity-error term. The fixed-target step experiment
 continues to use zero desired velocity, including with a damping override.
 
+Use `--record-control` for trajectory controller diagnostics. It saves
+`control.npz` alongside `steps.npz`, with desired/measured joint position and
+velocity, feedforward effort, computed effort, clipped applied effort, and the
+effort command submitted to PhysX. All signals are sampled after actuator
+computation and before the physics step, so the measured state is the state
+used to compute that sample's torque. Applied effort is a command, not a
+measurement of net joint torque including constraint or contact reactions.
+Positions use radians, velocities rad/s, and efforts N m. Joint ordering matches
+`joint_names`; metadata identifies active joints and their effort limits.
+
+Negative trace times record initial settling. At trajectory time `t`, the
+command drives `[t, t+dt)` and its position target is the interpolated reference
+at `t+dt`, matching the existing playback convention. In contrast, `steps.npz`
+contains the post-step state. For example, this includes the control sample at
+exactly 1 s by playing slightly beyond it:
+
+```bash
+python playback.py --mode joint --headless --episodes 0 --kd-scale 4 \
+  --max-frames 32 --record-control --output outputs/episode-0-control-kd-4
+```
+
 Previous-day output folders are organized under `outputs/archive/YYYY-MM-DD/`.
 The archive contains a move manifest; recorded paths inside older run metadata
 retain their original provenance. The 2026-11-18 damping sweep, joint-window

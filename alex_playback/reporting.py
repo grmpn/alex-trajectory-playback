@@ -130,6 +130,16 @@ class Recorder:
         self.steps = []
         self.frames = []
         self.pairs = []
+        self.controls = []
+
+    def control(self, simulation_time, phase, signals):
+        self.controls.append(
+            {
+                "simulation_time_s": simulation_time,
+                "phase": phase,
+                **{name: np.asarray(value).copy() for name, value in signals.items()},
+            }
+        )
 
     def step(
         self,
@@ -188,6 +198,14 @@ class Recorder:
         )
 
     def save(self, complete: bool):
+        if self.controls:
+            np.savez_compressed(
+                self.destination / "control.npz",
+                joint_names=np.array(self.joint_names),
+                **{
+                    key: np.asarray([row[key] for row in self.controls]) for key in self.controls[0]
+                },
+            )
         write_json(
             self.destination / "metadata.json",
             {
